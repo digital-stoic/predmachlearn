@@ -1,0 +1,164 @@
+---
+title: "Practical Machine Learning - Project"
+author: "mat"
+date: "11/21/2015"
+output: html_document
+---
+
+```{r environment_preparation, message = FALSE, include = FALSE}
+knitr::opts_chunk$set(fig.width=12, fig.height=6, 
+	echo=FALSE, message=FALSE, cache = TRUE)
+library(doMC)
+library(caret)
+library(rpart)
+library(rattle)
+registerDoMC(cores = 4) # Thanks AWS
+set.seed(42)            # For reproducibility
+```
+
+## Overview
+
+This project analyzes the data collected by the 
+[Human Activity Recognition](http://groupware.les.inf.puc-rio.br/har) research
+from Groupware @ LES. The goal is to go beyond identify *what activity* the human 
+subject is doing but *how well* is the activity performed. The subjects were
+wearing multiple body sensors (Fitbit-like) and executing a series of correct
+weight lifting exercices (Class A) and typical mistakes (Class B to E).
+
+After preparation of the raw data and separation into training set and testing 
+set, 3 models are assessed. The best performing model is the Random Forest
+algorithm. **The final accuracy on the test set is $99.2\%$**. 
+
+Once the model is trained and tested, it is used to predict the 20 cases from 
+the assignment. **The success rate of prediction is $100\%$**.
+
+## Data Preparation & Exploration
+
+```{r data_preparation, echo = TRUE}
+data <- read.csv('pml-training.csv', header = TRUE)
+inTrain  <- createDataPartition(data$classe, p=0.6, list=FALSE)
+# Training set: 11776 rows x 160 columns
+# Testing set:  7846 rows  x 160 columns
+training <- data[inTrain,]
+testing  <- data[-inTrain,]
+# Remove columns that are not predictors: X, user_name, raw_timestamp_part_1,
+# raw_timestamp_part_2, cvtd_timestamp, new_window, num_window
+# 152 predictors remaining
+training <- training[, -c(1:7)]
+testing  <- testing[, -c(1:7)]
+# Remove 54 variables with near zero variance : 99 predictors remaining
+nzv_id <- nearZeroVar(training)
+training <- training[, -nzv_id]
+testing  <- testing[, -nzv_id]
+# Remove 46 variables with more than 90% of NA values
+# 52 predictors eventually remaining
+nb_lin <- dim(training)[[1]]
+nb_col <- dim(training)[[2]]
+na_id <- sapply(1:nb_col, function(x) {
+	na_ratio <- sum(is.na(training[, x])) / nb_lin })
+is_na <- which(na_id > .9)
+training <- training[, -is_na]
+testing  <- testing[, -is_na]
+```
+The data have been randomly split into a training set ($60\%$) and a testing set
+($40\%$). The cross-validation splits are performed during the run of the models.
+
+The initial number of features is $159$, which is quite high. We are reducing 
+the number of features in order to run less computationally-intensive models:
+
+* The first $7$ columns are removed because they are not predictors per se: ID, 
+username, timestamps, etc..
+* $54$ columns with near zero variance are removed as they are useless for 
+training the model
+* $46$ columns with more than 90% of NA values are removed as they won't
+bute enough to the training
+
+$52$ predictors are eventually remaining, which is much better. In order to 
+boost the performance of the modelling, this R program is run on an 4-core AWS
+instance. The `doMC` package enables the parallelization of the computations.
+
+## Model Selection
+
+### Recursive Partitioning Tree
+
+```{r model_rpart_computation, echo = TRUE}
+model_rpart <- train(classe ~ ., data = training, method = 'rpart')
+```
+
+The first assessed model is Recursive Partitioning Tree. It is fast to run.
+
+```{r model_rpart_analysis, echo = TRUE}
+pred_rpart_train <- predict(model_rpart, training)
+cm_rpart_train   <- confusionMatrix(pred_rpart_train, training$classe)
+pred_rpart_test  <- predict(model_rpart, testing)
+cm_rpart_test    <- confusionMatrix(pred_rpart_test, testing$classe)
+# No D in the model?
+fancyRpartPlot(model_rpart$finalModel)
+plot(cm_rpart_test$table, col = cm_rpart_test$byClass, 
+     main = "Confusion Matrix for Recursive Partitioning Tree")
+```
+
+The Training Overall Accuracy is $`r format(cm_rpart_train$overall[[1]], digits = 3)`$
+and the  Testing Overall Accuracy is $`r format(cm_rpart_test$overall[[1]], digits = 3)`$
+. This is not  satisfactory. In addition, the D class is present in no leaf of 
+the tree: It  means this class cannot be predicted by the Model!
+
+### Gradient Boosting
+
+```{r model_gradient_boosting_computation, echo = TRUE, results = 'hide'}
+model_gbm <- train(classe ~ ., data = training, method = 'gbm')
+```
+
+The second assessed model is Gradient Boosting. It takes a few minutes to run
+on a 4-core AWS instance.
+
+```{r model_gradient_boosting_analysis}
+pred_gbm_train <- predict(model_gbm, training)
+cm_gbm_train   <- confusionMatrix(pred_gbm_train, training$classe)
+pred_gbm_test  <- predict(model_gbm, testing)
+cm_gbm_test    <- confusionMatrix(pred_gbm_test, testing$classe)
+plot(cm_gbm_test$table, col = cm_gbm_test$byClass, 
+     main = "Confusion Matrix for Gradient Boosting")
+```
+
+The Training Overall Accuracy is $`r format(cm_gbm_train$overall[[1]], digits = 3)`$
+and the  Testing Overall Accuracy is $`r format(cm_gbm_test$overall[[1]], digits = 3)`$.
+This is a satisfactory level, but let's see if we can find a more accurate 
+model. 
+
+### Random Forest
+
+```{r model_random_forest_computation, echo = TRUE}
+model_rf <- train(classe ~ ., data = training, method = 'rf', 
+    trcontrol = trainControl(method = 'cv', number = 3))
+```
+
+The third assessed model is Random Forest. It takes around 30 minutes to run
+on a 4-core AWS instance.
+
+```{r model_random_forest_analysis, echo = TRUE}
+pred_rf_train <- predict(model_rf, training)
+cm_rf_train   <- confusionMatrix(pred_rf_train, training$classe)
+pred_rf_test  <- predict(model_rf, testing)
+cm_rf_test    <- confusionMatrix(pred_rf_test, testing$class)
+plot(cm_rf_test$table, col = cm_rf_test$byClass, 
+     main = "Confusion Matric for Random Forest")
+plot(varImp(model_rf), main = "Random Forest Variables by Importance")
+```
+
+The Training Overall Accuracy is $`r format(cm_rf_train$overall[[1]], digits = 3)`$
+and the Testing Overall Accuracy is $`r format(cm_rf_test$overall[[1]], digits = 3)`$.
+This is  satisfactory. The Random Forest Model will be used for the prediction 
+of the Test Set.
+
+## Prediction For The 20 Test Cases
+
+
+```{r prediction_test_set, echo = TRUE}
+data_test <- read.csv('pml-testing.csv', header = TRUE)
+predict(model_rf, data_test)
+```
+
+The prediction results are submitted manually by uploading the result files. 
+$100\%$ of the predictions are correct.
+
